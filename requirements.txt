@@ -1,0 +1,5 @@
+discord.py>=2.3
+aiofiles
+python-dotenv
+tqdm
+pytest

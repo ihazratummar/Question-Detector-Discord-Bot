@@ -1,0 +1,10 @@
+{
+  "guild_ids": [],
+  "channel_ids": [],
+  "export_path": "export.txt",
+  "dedupe_registry": "dedupe_registry.json",
+  "checkpoint_file": "checkpoints.json",
+  "language": "sv",
+  "extra_keywords": ["fråga"],
+  "use_ai_detection": false
+}

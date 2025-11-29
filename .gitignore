@@ -1,0 +1,13 @@
+.env
+exporter.log
+export.txt
+dedupe_registry.json
+checkpoints.json
+
+__pycache__
+.__pycache__
+**/__pycache__
+.pytest_cache
+.venv
+.config.json
+config.json
