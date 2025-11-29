@@ -11,3 +11,4 @@ __pycache__
 .venv
 .config.json
 config.json
+/build

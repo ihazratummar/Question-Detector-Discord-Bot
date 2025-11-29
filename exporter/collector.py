@@ -24,6 +24,11 @@ class Collector:
         self.storage = storage
         self.checkpoint_file = checkpoint_file
         self.checkpoints: Dict[str, int] = self._load_checkpoints()
+        
+        # Control events
+        self.stop_event = asyncio.Event()
+        self.pause_event = asyncio.Event()
+        self.pause_event.set() # Initially not paused (set means "go")
 
     def _load_checkpoints(self) -> Dict[str, int]:
         if os.path.exists(self.checkpoint_file):
@@ -41,7 +46,7 @@ class Collector:
         except Exception as e:
             logging.error(f"Failed to save checkpoints: {e}")
 
-    async def process_channel(self, channel: discord.TextChannel, limit: Optional[int] = None):
+    async def process_channel(self, channel: discord.TextChannel, limit: Optional[int] = None, progress_callback=None):
         logging.info(f"Starting processing for channel: {channel.name} ({channel.id})")
         
         last_id = self.checkpoints.get(str(channel.id))
@@ -57,6 +62,14 @@ class Collector:
             # We use history(after=...) to resume. 
             # oldest_first=True is important to process in chronological order.
             async for message in channel.history(limit=limit, after=after, oldest_first=True):
+                # Check for stop
+                if self.stop_event.is_set():
+                    logging.info("Export stopped by user.")
+                    return
+
+                # Check for pause
+                await self.pause_event.wait()
+
                 processed_count += 1
                 
                 if message.author.bot:
@@ -77,14 +90,29 @@ class Collector:
                     self._save_checkpoints()
                     self.registry.save()
                     message_buffer = []
+                    
+                    if progress_callback:
+                        progress_callback(processed_count, count)
+                    
+                    # Small delay to be nice to API
+                    await asyncio.sleep(0.5)
             
             # Process remaining buffer
             if message_buffer:
+                # Check for stop before final batch
+                if self.stop_event.is_set():
+                    logging.info("Export stopped by user.")
+                    return
+                await self.pause_event.wait()
+
                 questions_found = await self._process_batch(message_buffer, channel)
                 count += questions_found
                 self.checkpoints[str(channel.id)] = message_buffer[-1].id
                 self._save_checkpoints()
                 self.registry.save()
+                
+                if progress_callback:
+                    progress_callback(processed_count, count)
 
             logging.info(f"Finished channel {channel.name}. Found {count} new questions. Processed {processed_count} messages.")
 
@@ -106,7 +134,11 @@ class Collector:
                     found += 1
         return found
 
-    async def collect_from_channels(self, channel_ids: List[int], concurrency: int = 3):
+    async def collect_from_channels(self, channel_ids: List[int], concurrency: int = 3, progress_callback=None):
+        # Reset control events
+        self.stop_event.clear()
+        self.pause_event.set()
+
         channels = []
         for cid in channel_ids:
             ch = self.client.get_channel(cid)
@@ -119,6 +151,7 @@ class Collector:
 
         async def worker(channel):
             async with semaphore:
-                await self.process_channel(channel)
+                if not self.stop_event.is_set():
+                    await self.process_channel(channel, progress_callback=progress_callback)
 
         await asyncio.gather(*(worker(ch) for ch in channels))

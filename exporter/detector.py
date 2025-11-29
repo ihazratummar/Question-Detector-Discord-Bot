@@ -15,10 +15,12 @@ import asyncio
 import logging
 
 class HuggingFaceDetector:
-    def __init__(self, api_key: str, model: str = "KBLab/bert-base-swedish-cased"):
+    API_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"
+
+    def __init__(self, api_key: str):
         self.api_key = api_key
-        self.api_url = f"https://api-inference.huggingface.co/models/{model}"
-        self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.api_error_count = 0
+        self.max_api_errors = 5 # Disable AI after this many errors
 
     async def is_question(self, text: str) -> bool:
         """
@@ -34,48 +36,74 @@ class HuggingFaceDetector:
         if not texts:
             return []
 
-        # Using a multilingual zero-shot classifier
-        model = "joeddav/xlm-roberta-large-xnli" 
-        api_url = f"https://api-inference.huggingface.co/models/{model}"
+        if self.api_error_count >= self.max_api_errors:
+            # Fallback to keywords if too many errors
+            # logging.warning("HuggingFaceDetector disabled...") # Silenced
+            return [False] * len(texts)
+
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         
-        # HF Inference API supports batch inputs for zero-shot
         payload = {
             "inputs": texts,
-            "parameters": {"candidate_labels": ["fråga", "påstående"]}
+            "parameters": {
+                "candidate_labels": ["question", "statement"],
+                "multi_label": False
+            }
         }
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, headers=self.headers, json=payload) as response:
-                    if response.status != 200:
-                        logging.warning(f"HF API Error {response.status}: {await response.text()}")
-                        return [False] * len(texts)
-                    
-                    results = await response.json()
-                    # Result format for batch: List of dicts
-                    # [{'sequence': '...', 'labels': [...], 'scores': [...]}, ...]
-                    
-                    if isinstance(results, dict): # Single result returned if batch size 1 sometimes
-                        results = [results]
+        retries = 3
+        for attempt in range(retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.API_URL, headers=headers, json=payload) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            # Reset error count on success
+                            self.api_error_count = 0
+                            
+                            is_questions = []
+                            if isinstance(result, list):
+                                for item in result:
+                                    if isinstance(item, dict) and 'labels' in item and 'scores' in item:
+                                        labels = item['labels']
+                                        scores = item['scores']
+                                        try:
+                                            q_index = labels.index('question')
+                                            q_score = scores[q_index]
+                                            is_questions.append(q_score > 0.5)
+                                        except ValueError:
+                                            is_questions.append(False)
+                                    else:
+                                        is_questions.append(False)
+                            else:
+                                 return [False] * len(texts)
+                            return is_questions
                         
-                    final_results = []
-                    for result in results:
-                        if 'labels' in result and 'scores' in result:
-                            labels = result['labels']
-                            scores = result['scores']
-                            try:
-                                idx = labels.index("fråga")
-                                score = scores[idx]
-                                final_results.append(score > 0.5)
-                            except ValueError:
-                                final_results.append(False)
+                        elif response.status in [401, 403]:
+                            # Auth error, disable permanently
+                            error_text = await response.text()
+                            logging.error(f"HF API Auth Error {response.status}: {error_text}. Disabling AI.")
+                            self.api_error_count = self.max_api_errors
+                            return [False] * len(texts)
+                        
+                        elif response.status in [429, 500, 502, 503, 504]:
+                            # Transient error, retry
+                            logging.warning(f"HF API Transient Error {response.status}. Retrying {attempt+1}/{retries}...")
+                            await asyncio.sleep(2 * (attempt + 1)) # Backoff
+                            continue
+                        
                         else:
-                            final_results.append(False)
-                    return final_results
+                            # Other error
+                            logging.warning(f"HF API Error {response.status}: {await response.text()}")
+                            break
 
-        except Exception as e:
-            logging.error(f"HF API Exception: {e}")
-            return [False] * len(texts)
+            except Exception as e:
+                logging.error(f"Error calling HF API: {e}")
+                await asyncio.sleep(1)
+        
+        # If we get here, all retries failed
+        self.api_error_count += 1
+        return [False] * len(texts)
 
 class QuestionDetector:
     def __init__(self, language: str = "sv", extra_keywords: Optional[List[str]] = None, 
